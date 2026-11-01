@@ -71,7 +71,7 @@ PAGE = """<!doctype html>
            padding:8px 14px; font:inherit; cursor:pointer; }
   p.hint { color:#7f8c98; font-size:12px; }
 </style>
-<h1>Ornith-Linux <span>Linux 6.1.14 on the reference CPU - login: root (no password), then try: ask "what is the capital of France" or hermes-agent "your task in quotes"</span></h1>
+<h1>Ornith-Linux <span>Linux 6.1.14 on the reference CPU - boots and logs in as root on its own, then try: ask "what is the capital of France" or hermes-agent "your task in quotes"</span></h1>
 <div id="term" tabindex="0"></div>
 <div id="row">
   <input id="box" placeholder="or type here and Send (Enter sends too) - good for phones">
@@ -134,10 +134,13 @@ poll();
 
 
 class MachineThread(threading.Thread):
-    """Runs the guest in slices; auto-installs /tmp/ask once a shell is up."""
+    """Runs the guest in slices; auto-logs-in as root, then auto-installs
+    the agent tools once a shell is up."""
 
-    def __init__(self, image: bytes, dtb: bytes, backend, machine=None, warm=False):
+    def __init__(self, image: bytes, dtb: bytes, backend, machine=None,
+                 warm=False, autologin=True):
         super().__init__(daemon=True)
+        self.autologin = autologin
         if machine is not None:
             self.m = machine
             if warm:
@@ -191,7 +194,11 @@ class MachineThread(threading.Thread):
                 out = bytes(self.m.out)
                 steps = self.m.steps
             if self.phase == 0 and b"buildroot login:" in out:
-                self.phase = 1  # the user logs in; watch for their shell
+                if self.autologin:
+                    # root has no password: log straight in so the brain
+                    # always finds a working shell, even after a reboot
+                    self.feed(b"root\n")
+                self.phase = 1  # watch for the shell
                 self.phase_steps = steps
             elif self.phase == 1:
                 if b"CANARY_42" in out:
@@ -237,6 +244,9 @@ def main() -> int:
     ap.add_argument("--fast", action="store_true",
                     help="run the guest on the fastlinux.c native core")
     ap.add_argument("--fast-bin", default=None)
+    ap.add_argument("--no-autologin", dest="autologin", action="store_false",
+                    default=True,
+                    help="leave the guest at the login prompt (debug only)")
     args = ap.parse_args()
     if not args.snapshot and not args.image:
         ap.error("the Image path is required unless --snapshot is given")
@@ -263,7 +273,8 @@ def main() -> int:
     else:
         image = Path(args.image).read_bytes()
         dtb = Path(args.dtb).read_bytes()
-    mt = MachineThread(image, dtb, backend, machine=machine, warm=warm)
+    mt = MachineThread(image, dtb, backend, machine=machine, warm=warm,
+                     autologin=args.autologin)
     mt.start()
     model = getattr(backend, "model", None)
     print(f"[liveterm: backend={args.backend}" + (f" model={model}" if model else "")
