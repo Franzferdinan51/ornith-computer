@@ -9,6 +9,7 @@ class _FakeMachine:
         self.steps = 0
         self.halted = False
         self.fed = []
+        self.slices = []
         self.on_qwen_prompt = None
         self._n = 0
 
@@ -17,6 +18,7 @@ class _FakeMachine:
 
     def run(self, n):
         self.steps += n
+        self.slices.append(n)
         self._n += 1
         if self._n >= 3:
             self.halted = True
@@ -49,3 +51,14 @@ def test_no_autologin_leaves_login_prompt_alone():
     mt.run()
     assert m.fed == []
     assert mt.phase == 1
+
+
+def test_slice_steps_passed_to_machine():
+    m = _FakeMachine(b"")
+    mt = MachineThread(b"", b"", None, machine=m, slice_steps=1000000)
+    mt.run()
+    assert m.slices == [1000000] * 3
+    m2 = _FakeMachine(b"")
+    mt2 = MachineThread(b"", b"", None, machine=m2)
+    mt2.run()
+    assert m2.slices == [20000] * 3

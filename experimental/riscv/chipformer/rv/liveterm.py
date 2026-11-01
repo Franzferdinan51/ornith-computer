@@ -138,9 +138,14 @@ class MachineThread(threading.Thread):
     the agent tools once a shell is up."""
 
     def __init__(self, image: bytes, dtb: bytes, backend, machine=None,
-                 warm=False, autologin=True):
+                 warm=False, autologin=True, slice_steps=20_000):
         super().__init__(daemon=True)
         self.autologin = autologin
+        # steps per host round-trip. 20k suits the ~0.5M/s python oracle;
+        # the ~228M/s native core takes 10M: each slice costs tens of ms
+        # of launchd QoS wait no matter its size, so small slices
+        # throttle the guest to <1M/s. Worst-case console latency ~130ms.
+        self.slice_steps = slice_steps
         if machine is not None:
             self.m = machine
             if warm:
@@ -188,11 +193,21 @@ class MachineThread(threading.Thread):
         pending = bytearray()
         fed_mark = 0
         fed_stall = 0
+        quiet = 0
+        last_out = 0
         while not self.m.halted:
             with self.lock:
-                self.m.run(20_000)
+                self.m.run(self.slice_steps)
                 out = bytes(self.m.out)
                 steps = self.m.steps
+            # idle backoff: a quiet console means an idle guest - sleep
+            # longer so 24/7 idling doesn't burn a host core at 1M-step
+            # slices. Any output or install feeding resets to full rate.
+            if len(out) != last_out or pending:
+                quiet = 0
+                last_out = len(out)
+            else:
+                quiet += 1
             if self.phase == 0 and b"buildroot login:" in out:
                 if self.autologin:
                     # root has no password: log straight in so the brain
@@ -226,7 +241,7 @@ class MachineThread(threading.Thread):
                     fed_stall = 0
                 else:
                     fed_stall += 1
-            time.sleep(0.01)
+            time.sleep(0.05 if quiet > 200 else 0.002)
 
 
 def main() -> int:
@@ -247,6 +262,9 @@ def main() -> int:
     ap.add_argument("--no-autologin", dest="autologin", action="store_false",
                     default=True,
                     help="leave the guest at the login prompt (debug only)")
+    ap.add_argument("--slice", dest="slice_steps", type=int, default=None,
+                    help="guest steps per host round-trip (default: 10M for "
+                    "the fast core, 20k for the python oracle)")
     args = ap.parse_args()
     if not args.snapshot and not args.image:
         ap.error("the Image path is required unless --snapshot is given")
@@ -273,8 +291,11 @@ def main() -> int:
     else:
         image = Path(args.image).read_bytes()
         dtb = Path(args.dtb).read_bytes()
+    if args.slice_steps is None:
+        args.slice_steps = 10_000_000 if (args.fast or args.snapshot) else 20_000
     mt = MachineThread(image, dtb, backend, machine=machine, warm=warm,
-                     autologin=args.autologin)
+                     autologin=args.autologin,
+                     slice_steps=args.slice_steps)
     mt.start()
     model = getattr(backend, "model", None)
     print(f"[liveterm: backend={args.backend}" + (f" model={model}" if model else "")
