@@ -33,6 +33,20 @@ def test_pick_fused_build_matches_broad_family_by_default():
         "ornith-fused-q8"
 
 
+def test_pick_canonical_9b_beats_bigger_siblings():
+    # production ids: the vision-tagged 9B has MORE tags than the 122B,
+    # but the 9B this fork is configured for still wins
+    ids = ["ornith-1.5-122b-mlx", "ornith-1.5-9b-mlx-vision",
+           "ornith-1.5-35b-a3b-mlx-vision"]
+    assert qb.pick_builtin_model(ids) == "ornith-1.5-9b-mlx-vision"
+
+
+def test_pick_bigger_sibling_seats_when_9b_absent():
+    ids = ["llama-8b", "ornith-1.5-122b-mlx",
+           "ornith-1.5-35b-a3b-mlx-vision"]
+    assert qb.pick_builtin_model(ids) == "ornith-1.5-122b-mlx"
+
+
 def test_pick_pin_wins_even_outside_family():
     ids = ["ornith-ai/ornith-1.5-9b", "llama-8b-fused"]
     assert qb.pick_builtin_model(ids, pin="llama-8b-fused") == \
@@ -129,6 +143,19 @@ def test_dashboard_resolve_model_honors_family_env(monkeypatch):
     monkeypatch.setenv("ORNITH_FAMILY", "soc")
     model, err = D.resolve_model(s)
     assert model == "soc-fused-q8" and err is None
+
+
+def test_dashboard_resolve_model_prefers_9b(monkeypatch):
+    def fake_urlopen(url, timeout=None):
+        return _FakeResp({"data": [
+            {"id": "ornith-1.5-122b-mlx"},
+            {"id": "ornith-1.5-9b-mlx-vision"},
+            {"id": "ornith-1.5-35b-a3b-mlx-vision"}]})
+    monkeypatch.setattr(D.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.delenv("ORNITH_FAMILY", raising=False)
+    model, err = D.resolve_model(
+        {"backend_url": "http://127.0.0.1:1", "model": "auto"})
+    assert model == "ornith-1.5-9b-mlx-vision" and err is None
 
 
 # --- guest FIFO queue ---

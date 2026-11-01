@@ -131,13 +131,19 @@ def save_settings(new):
     return s
 
 
+# mirrors qwenbackend.PREFERRED_SEAT: the 9B build this fork is
+# configured for outranks bigger Ornith siblings when several match.
+PREFERRED_SEAT = "ornith-1.5-9b"
+
+
 def resolve_model(s):
     """Builtin rule (mirrors qwenbackend.builtin_backend): the ornith
     family member already listed by the backend (ORNITH_FAMILY overrides
-    the family substring for fused/GGUF builds under a new name); a
-    pristine base id wins over fine-tune tags; never loads anything,
-    and never silently serves a different model when the wanted one is
-    missing (the page already renders a None model as unreachable)."""
+    the family substring for fused/GGUF builds under a new name); the
+    preferred 9B seat outranks bigger siblings, then a pristine base
+    id wins over fine-tune tags; never loads anything, and never
+    silently serves a different model when the wanted one is missing
+    (the page already renders a None model as unreachable)."""
     try:
         url = s["backend_url"].rstrip("/") + "/v1/models"
         with urllib.request.urlopen(url, timeout=5) as r:
@@ -156,9 +162,12 @@ def resolve_model(s):
     family = (os.environ.get("ORNITH_FAMILY") or "ornith").lower()
     fam = [i for i in ids if family in i.lower()]
     if fam:
-        # pristine/base build (fewest dash-separated tags after the org
-        # prefix) wins over tagged fine-tunes when several match
-        fam.sort(key=lambda i: (i.lower().rsplit("/", 1)[-1].count("-"), i))
+        # the preferred 9B seat outranks bigger Ornith siblings; then
+        # the pristine/base build (fewest dash-separated tags after
+        # the org prefix) wins over tagged fine-tunes
+        fam.sort(key=lambda i: (
+            0 if PREFERRED_SEAT in i.lower() else 1,
+            i.lower().rsplit("/", 1)[-1].count("-"), i))
         return fam[0], None
     return None, "no %s model loaded (have: %s)" % (
         family, ", ".join(ids)[:120])

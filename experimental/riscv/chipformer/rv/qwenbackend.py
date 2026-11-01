@@ -102,14 +102,19 @@ def lmstudio_backend(base_url: str | None = None, proxy: str | None = None,
 # the harness is preconfigured to think with it. Broad on purpose: the
 # stock id, a fused build, and a GGUF all carry the substring.
 BUILTIN_FAMILY = "ornith"
+# ...but when several Ornith builds are loaded, the 9B this fork is
+# configured for outranks its bigger siblings; they still seat fine
+# when it is absent.
+PREFERRED_SEAT = "ornith-1.5-9b"
 
 
 def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
     """Pick the seated model id from LM Studio's model list (pure: no I/O).
 
     An exact pin wins when it names a listed id; otherwise the family
-    substring decides (a pristine/base build wins over tagged
-    fine-tunes when several match). Raises RuntimeError instead of
+    substring decides (the preferred 9B seat outranks bigger Ornith
+    siblings, then a pristine/base build wins over tagged fine-tunes).
+    Raises RuntimeError instead of
     serving a different model — the harness must think with the
     built-in weights or say so. After a fuse/GGUF conversion the new
     build keeps working here as long as its LM Studio id still carries
@@ -131,9 +136,12 @@ def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
             f"LM Studio (have: {', '.join(ids) or 'no models'}); load a "
             f"matching build first, or point ORNITH_MODEL/ORNITH_FAMILY at "
             f"the fused build's id")
+    # the preferred 9B seat outranks bigger Ornith siblings; then the
     # pristine/base build (fewest dash-separated tags after the org
-    # prefix) wins over tagged fine-tunes when several match
-    fam.sort(key=lambda i: (i.lower().rsplit("/", 1)[-1].count("-"), i))
+    # prefix) wins over tagged fine-tunes
+    fam.sort(key=lambda i: (
+        0 if PREFERRED_SEAT in i.lower() else 1,
+        i.lower().rsplit("/", 1)[-1].count("-"), i))
     return fam[0]
 
 
