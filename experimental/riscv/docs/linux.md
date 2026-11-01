@@ -197,7 +197,12 @@ dashboard all talk weight-format-blind HTTP and console text — as
 long as the fused build's LM Studio id still carries the family
 substring (an `ornith-fused-q8` GGUF does); under a wholly new
 name, seat it with `ORNITH_MODEL=<exact id>` or
-`ORNITH_FAMILY=<substring>` in the service environment. Honesty
+`ORNITH_FAMILY=<substring>` in the service environment. Resolution
+order everywhere is explicit args, then env, then the dashboard's
+Settings file, then code defaults: the Settings UI's backend, model,
+seat family/preferred, and guest-brain temperature/tokens drive the
+guest brain too (liveterm picks them up on its next start), while
+the `ORNITH_*` env vars stay the operator override. Honesty
 note: the live proofs in `boot-logs/` ran with the Qwen seat on
 `qwenputer-linux`; re-running them with Ornith seated is this
 fork's first verification step. In the circuit endgame this same

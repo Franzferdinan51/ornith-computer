@@ -69,6 +69,10 @@ DEFAULTS = {
     "decider_enabled": False,
     "decider_url": "http://127.0.0.1:1234",
     "decider_model": "",
+    "seat_family": "",
+    "seat_preferred": "",
+    "guest_temperature": 0.7,
+    "guest_max_tokens": 1024,
     "system_prompt": (
         "WHO YOU ARE. You are the brain of Ornith-Computer: "
         "Ornith 1.5 9B. A real RISC-V Linux computer runs beside "
@@ -126,6 +130,11 @@ def save_settings(new):
     s["guest_enabled"] = bool(s.get("guest_enabled", True))
     s["guest_budget"] = max(60, min(3600, int(s.get("guest_budget", 600))))
     s["decider_enabled"] = bool(s.get("decider_enabled", False))
+    s["seat_family"] = (s.get("seat_family") or "").strip()
+    s["seat_preferred"] = (s.get("seat_preferred") or "").strip()
+    s["guest_temperature"] = float(s.get("guest_temperature", 0.7))
+    s["guest_max_tokens"] = max(
+        64, min(32768, int(s.get("guest_max_tokens", 1024))))
     with open(SETTINGS_PATH, "w") as f:
         json.dump(s, f, indent=1)
     return s
@@ -138,10 +147,11 @@ PREFERRED_SEAT = "ornith-1.5-9b"
 
 def resolve_model(s):
     """Builtin rule (mirrors qwenbackend.builtin_backend): the ornith
-    family member already listed by the backend (ORNITH_FAMILY overrides
-    the family substring for fused/GGUF builds under a new name); the
-    preferred 9B seat outranks bigger siblings, then a pristine base
-    id wins over fine-tune tags; never loads anything, and never
+    family member already listed by the backend (env ORNITH_FAMILY, then
+    the seat_family setting, then "ornith"; same ladder with
+    ORNITH_PREFERRED / seat_preferred for the preferred seat, which
+    outranks bigger siblings); then a pristine base id wins over
+    fine-tune tags; never loads anything, and never
     silently serves a different model when the wanted one is missing
     (the page already renders a None model as unreachable)."""
     try:
@@ -159,14 +169,17 @@ def resolve_model(s):
             return want, None
         return None, "model %r is not loaded (have: %s)" % (
             want, ", ".join(ids)[:120])
-    family = (os.environ.get("ORNITH_FAMILY") or "ornith").lower()
+    family = (os.environ.get("ORNITH_FAMILY") or s.get("seat_family")
+              or "ornith").lower()
+    preferred = (os.environ.get("ORNITH_PREFERRED")
+                 or s.get("seat_preferred") or PREFERRED_SEAT).lower()
     fam = [i for i in ids if family in i.lower()]
     if fam:
-        # the preferred 9B seat outranks bigger Ornith siblings; then
-        # the pristine/base build (fewest dash-separated tags after
-        # the org prefix) wins over tagged fine-tunes
+        # the preferred seat outranks bigger Ornith siblings; then the
+        # pristine/base build (fewest dash-separated tags after the
+        # org prefix) wins over tagged fine-tunes
         fam.sort(key=lambda i: (
-            0 if PREFERRED_SEAT in i.lower() else 1,
+            0 if preferred in i.lower() else 1,
             i.lower().rsplit("/", 1)[-1].count("-"), i))
         return fam[0], None
     return None, "no %s model loaded (have: %s)" % (
@@ -1181,6 +1194,10 @@ guest CPU/RAM from its <code>/proc</code> &mdash; never the host.
 <input type="text" id="s-backend">
 <label>model (auto = the Ornith already loaded; or an exact model id)</label>
 <input type="text" id="s-model">
+<label>seat family override (blank = auto: env, then <code>ornith</code> — a loaded id must carry this)</label>
+<input type="text" id="s-seatfamily" placeholder="ornith">
+<label>preferred seat (blank = auto: env, then <code>ornith-1.5-9b</code> — outranks bigger siblings)</label>
+<input type="text" id="s-seatpreferred" placeholder="ornith-1.5-9b">
 <label>temperature</label>
 <input type="number" id="s-temp" step="0.1" min="0" max="2">
 <label>max tokens per reply (Ornith thinks in &lt;think&gt; blocks first &mdash; 8192 is the working floor for tool talk)</label>
@@ -1190,6 +1207,10 @@ guest CPU/RAM from its <code>/proc</code> &mdash; never the host.
 <label style="margin-top:16px"><input type="checkbox" id="s-guest" style="width:auto;margin-right:8px">let chat hand jobs to the guest computer</label>
 <label>guest wait budget, seconds (60&ndash;3600 &mdash; how long one delegation may queue + work)</label>
 <input type="number" id="s-budget" step="60" min="60" max="3600">
+<label>guest brain temperature (the liveterm agent seat; chat uses the temperature above)</label>
+<input type="number" id="s-guesttemp" step="0.1" min="0" max="2">
+<label>guest brain tokens per reply (1024 floor &mdash; agent work starves below it)</label>
+<input type="number" id="s-guesttokens" step="128" min="64" max="32768">
 <h3 style="font-size:14px;letter-spacing:.05em;color:var(--acc);margin-top:20px">DECISION MODEL (OPTIONAL)</h3>
 <label><input type="checkbox" id="s-decider" style="width:auto;margin-right:8px">enable a fast decision-model sidecar</label>
 <label>decision model URL (LM Studio serves here by default &mdash; same address as the seat is fine)</label>
@@ -1681,6 +1702,10 @@ activity();
 async function loadSettings(){
  const r=await fetch('/api/settings');const j=await r.json();
  $('s-backend').value=j.backend_url;$('s-model').value=j.model;
+ $('s-seatfamily').value=j.seat_family||'';
+ $('s-seatpreferred').value=j.seat_preferred||'';
+ $('s-guesttemp').value=j.guest_temperature;
+ $('s-guesttokens').value=j.guest_max_tokens;
  $('s-temp').value=j.temperature;$('s-tokens').value=j.max_tokens;
  $('s-sys').value=j.system_prompt;
  $('s-guest').checked=j.guest_enabled!==false;
@@ -1692,6 +1717,9 @@ async function loadSettings(){
 loadSettings();
 $('save').onclick=async()=>{
  const body={backend_url:$('s-backend').value,model:$('s-model').value,
+  seat_family:$('s-seatfamily').value,seat_preferred:$('s-seatpreferred').value,
+  guest_temperature:parseFloat($('s-guesttemp').value),
+  guest_max_tokens:parseInt($('s-guesttokens').value),
   temperature:parseFloat($('s-temp').value),
   max_tokens:parseInt($('s-tokens').value),system_prompt:$('s-sys').value,
   guest_enabled:$('s-guest').checked,

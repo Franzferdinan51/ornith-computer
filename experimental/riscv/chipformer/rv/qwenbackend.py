@@ -34,7 +34,8 @@ def echo_backend(prompt: str) -> str:
 
 
 def lmstudio_backend(base_url: str | None = None, proxy: str | None = None,
-                     model: str | None = None):
+                     model: str | None = None, temperature=None,
+                     max_tokens=None):
     """Return a backend that asks a model in LM Studio.
 
     base_url: LM Studio root (default env ORNITH_LM_URL, else
@@ -44,6 +45,8 @@ def lmstudio_backend(base_url: str | None = None, proxy: str | None = None,
     model: pin an exact model id (or env ORNITH_MODEL); without a pin the
     first listed model is used (the original auto-detect behavior).
     A pin of "auto" (the dashboard's word) also means unpinned.
+    temperature/max_tokens: explicit values win; else ORNITH_TEMP /
+    ORNITH_MAX_TOKENS; else 0.7 / 220.
     """
     base = (base_url or os.environ.get("ORNITH_LM_URL")
             or "http://127.0.0.1:1234").rstrip("/")
@@ -75,10 +78,14 @@ def lmstudio_backend(base_url: str | None = None, proxy: str | None = None,
         raise RuntimeError(f"pinned model {model!r} is not available in "
                            f"LM Studio at {base} (have: {', '.join(ids)})")
     try:
-        temperature = float(os.environ.get("ORNITH_TEMP", "0.7"))
-        max_tokens = int(os.environ.get("ORNITH_MAX_TOKENS", "220"))
-    except ValueError as e:
-        raise RuntimeError(f"bad ORNITH_TEMP/ORNITH_MAX_TOKENS in the environment: {e}")
+        temperature = float(temperature if temperature is not None
+                            else os.environ.get("ORNITH_TEMP", "0.7"))
+        max_tokens = int(max_tokens if max_tokens is not None
+                         else os.environ.get("ORNITH_MAX_TOKENS", "220"))
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(
+            f"bad temperature/max_tokens (arg or "
+            f"ORNITH_TEMP/ORNITH_MAX_TOKENS): {e}")
 
     def ask(prompt: str) -> str:
         out = call("/v1/chat/completions", {
@@ -108,11 +115,26 @@ BUILTIN_FAMILY = "ornith"
 PREFERRED_SEAT = "ornith-1.5-9b"
 
 
-def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
+def _rig_settings():
+    """The dashboard's settings file when this runs on a rig ({} when
+    absent or unparseable). Lets the Settings UI drive the guest brain
+    too: explicit args win, then env, then these, then code defaults."""
+    path = os.environ.get("ORNITH_DASH_SETTINGS") or os.path.expanduser(
+        "~/ornith-test/dash-settings.json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY,
+                       preferred=PREFERRED_SEAT):
     """Pick the seated model id from LM Studio's model list (pure: no I/O).
 
     An exact pin wins when it names a listed id; otherwise the family
-    substring decides (the preferred 9B seat outranks bigger Ornith
+    substring decides (the preferred seat outranks bigger Ornith
     siblings, then a pristine/base build wins over tagged fine-tunes).
     Raises RuntimeError instead of
     serving a different model — the harness must think with the
@@ -129,6 +151,7 @@ def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
                 f'(have: {", ".join(ids) or "no models"})')
         return pin
     family = (family or BUILTIN_FAMILY).lower()
+    preferred = (preferred or PREFERRED_SEAT).lower()
     fam = [i for i in ids if family in i.lower()]
     if not fam:
         raise RuntimeError(
@@ -140,7 +163,7 @@ def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
     # pristine/base build (fewest dash-separated tags after the org
     # prefix) wins over tagged fine-tunes
     fam.sort(key=lambda i: (
-        0 if PREFERRED_SEAT in i.lower() else 1,
+        0 if preferred in i.lower() else 1,
         i.lower().rsplit("/", 1)[-1].count("-"), i))
     return fam[0]
 
@@ -148,16 +171,21 @@ def pick_builtin_model(ids, pin=None, family=BUILTIN_FAMILY):
 def builtin_backend(base_url: str | None = None, proxy: str | None = None):
     """The harness's preconfigured brain: Ornith 1.5 9B in LM Studio.
 
-    Resolves the family from the model list and pins it: a build whose
-    id carries no fine-tune tag (a pristine/base Ornith 1.5 9B) wins over
-    tagged fine-tunes when both are present; otherwise the first family
-    match serves. Raises when no Ornith 1.5 9B is available at all — the
+    Resolution order is explicit args, then env, then the dashboard's
+    Settings file on a rig, then code defaults — so the Settings UI
+    drives the guest brain too, while env stays the operator override.
+    Pins an exact id (ORNITH_MODEL, or the UI's model unless "auto");
+    otherwise resolves the family (ORNITH_FAMILY, the UI's seat_family,
+    or "ornith") and the preferred seat (ORNITH_PREFERRED, the UI's
+    seat_preferred, or the 9B). Raises when nothing matches — the
     harness must think with the built-in weights or say so, never
-    silently fall back to a different model. ORNITH_MODEL pins an exact
-    id and ORNITH_FAMILY overrides the family substring, so a fused or
-    GGUF-converted build keeps working under its new name.
+    silently fall back to a different model. Generation params come
+    from ORNITH_TEMP / ORNITH_MAX_TOKENS, the UI's guest_temperature /
+    guest_max_tokens, or 0.7 / 1024.
     """
+    rig = _rig_settings()
     base = (base_url or os.environ.get("ORNITH_LM_URL")
+            or rig.get("backend_url")
             or "http://127.0.0.1:1234").rstrip("/")
     proxy = proxy or os.environ.get("ORNITH_LM_PROXY")
     opener = urllib.request.build_opener(
@@ -170,13 +198,30 @@ def builtin_backend(base_url: str | None = None, proxy: str | None = None):
     except Exception as e:
         raise RuntimeError(f"LM Studio request to {base}/v1/models failed: {e}")
     ids = [m.get("id") for m in data if m.get("id")]
+    pin = os.environ.get("ORNITH_MODEL")
+    if not pin:
+        m = (rig.get("model") or "").strip()
+        pin = m if m and m != "auto" else None
     try:
         choice = pick_builtin_model(
-            ids, pin=os.environ.get("ORNITH_MODEL"),
-            family=os.environ.get("ORNITH_FAMILY") or BUILTIN_FAMILY)
+            ids, pin=pin,
+            family=os.environ.get("ORNITH_FAMILY")
+            or rig.get("seat_family") or BUILTIN_FAMILY,
+            preferred=os.environ.get("ORNITH_PREFERRED")
+            or rig.get("seat_preferred") or PREFERRED_SEAT)
     except RuntimeError as e:
         raise RuntimeError(f"{e} at {base}")
-    return lmstudio_backend(base_url, proxy, model=choice)
+    try:
+        temperature = float(os.environ.get(
+            "ORNITH_TEMP", rig.get("guest_temperature", 0.7)))
+        max_tokens = int(os.environ.get(
+            "ORNITH_MAX_TOKENS", rig.get("guest_max_tokens", 1024)))
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(
+            f"bad ORNITH_TEMP/ORNITH_MAX_TOKENS or "
+            f"guest_temperature/guest_max_tokens: {e}")
+    return lmstudio_backend(base, proxy, model=choice,
+                            temperature=temperature, max_tokens=max_tokens)
 
 
 # A prompt from inside the guest harness always carries this phrase

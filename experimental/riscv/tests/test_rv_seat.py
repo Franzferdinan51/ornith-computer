@@ -111,17 +111,27 @@ def _list_models(monkeypatch, module, ids):
                         lambda *a, **k: FakeOpener())
 
 
-def test_builtin_backend_uses_env_pin_and_family(monkeypatch):
-    _list_models(monkeypatch, qb, ["ornith-ai/ornith-1.5-9b", "soc-fused-q8"])
-    seen = []
+def _no_rig(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORNITH_DASH_SETTINGS",
+                       str(tmp_path / "no-settings.json"))
+    for v in ("ORNITH_MODEL", "ORNITH_FAMILY", "ORNITH_PREFERRED",
+              "ORNITH_LM_URL", "ORNITH_LM_PROXY", "ORNITH_TEMP",
+              "ORNITH_MAX_TOKENS"):
+        monkeypatch.delenv(v, raising=False)
 
-    def fake_lm(base, proxy, model):
+
+def test_builtin_backend_uses_env_pin_and_family(monkeypatch, tmp_path):
+    _list_models(monkeypatch, qb, ["ornith-ai/ornith-1.5-9b", "soc-fused-q8"])
+    _no_rig(monkeypatch, tmp_path)
+    seen = []
+    seen_kw = []
+
+    def fake_lm(base, proxy, model, temperature=None, max_tokens=None):
         seen.append(model)
+        seen_kw.append((base, temperature, max_tokens))
         return lambda p: "ok"
 
     monkeypatch.setattr(qb, "lmstudio_backend", fake_lm)
-    monkeypatch.delenv("ORNITH_MODEL", raising=False)
-    monkeypatch.delenv("ORNITH_FAMILY", raising=False)
     qb.builtin_backend("http://127.0.0.1:1")
     monkeypatch.setenv("ORNITH_MODEL", "soc-fused-q8")
     qb.builtin_backend("http://127.0.0.1:1")
@@ -130,6 +140,72 @@ def test_builtin_backend_uses_env_pin_and_family(monkeypatch):
     qb.builtin_backend("http://127.0.0.1:1")
     assert seen == ["ornith-ai/ornith-1.5-9b", "soc-fused-q8",
                     "soc-fused-q8"]
+    assert seen_kw == [("http://127.0.0.1:1", 0.7, 1024)] * 3
+
+
+def _rig_file(monkeypatch, tmp_path, **over):
+    p = tmp_path / "dash-settings.json"
+    s = dict(D.DEFAULTS)
+    s.update(over)
+    with open(p, "w") as f:
+        json.dump(s, f)
+    monkeypatch.setenv("ORNITH_DASH_SETTINGS", str(p))
+    for v in ("ORNITH_MODEL", "ORNITH_FAMILY", "ORNITH_PREFERRED",
+              "ORNITH_LM_URL", "ORNITH_LM_PROXY", "ORNITH_TEMP",
+              "ORNITH_MAX_TOKENS"):
+        monkeypatch.delenv(v, raising=False)
+    return p
+
+
+def test_builtin_backend_reads_rig_settings_file(monkeypatch, tmp_path):
+    _list_models(monkeypatch, qb, ["ornith-ai/ornith-1.5-9b", "soc-fused-q8"])
+    _rig_file(monkeypatch, tmp_path, backend_url="http://127.0.0.1:9",
+              model="soc-fused-q8", guest_temperature=0.3,
+              guest_max_tokens=512)
+    got = {}
+
+    def fake_lm(base, proxy, model, temperature=None, max_tokens=None):
+        got.update(base=base, model=model, temperature=temperature,
+                   max_tokens=max_tokens)
+        return lambda p: "ok"
+
+    monkeypatch.setattr(qb, "lmstudio_backend", fake_lm)
+    qb.builtin_backend()
+    assert got == {"base": "http://127.0.0.1:9", "model": "soc-fused-q8",
+                   "temperature": 0.3, "max_tokens": 512}
+
+
+def test_builtin_backend_rig_family_and_preferred(monkeypatch, tmp_path):
+    _list_models(monkeypatch, qb, ["ornith-1.5-122b-mlx",
+                                   "ornith-1.5-9b-mlx-vision"])
+    _rig_file(monkeypatch, tmp_path,
+              seat_preferred="ornith-1.5-122b-mlx")
+    seen = []
+
+    def fake_lm(base, proxy, model, temperature=None, max_tokens=None):
+        seen.append(model)
+        return lambda p: "ok"
+
+    monkeypatch.setattr(qb, "lmstudio_backend", fake_lm)
+    qb.builtin_backend("http://127.0.0.1:1")
+    assert seen == ["ornith-1.5-122b-mlx"]
+
+
+def test_builtin_backend_env_beats_rig_file(monkeypatch, tmp_path):
+    _list_models(monkeypatch, qb, ["ornith-ai/ornith-1.5-9b", "soc-fused-q8"])
+    _rig_file(monkeypatch, tmp_path, model="soc-fused-q8",
+              guest_max_tokens=512)
+    monkeypatch.setenv("ORNITH_MODEL", "ornith-ai/ornith-1.5-9b")
+    monkeypatch.setenv("ORNITH_MAX_TOKENS", "256")
+    got = {}
+
+    def fake_lm(base, proxy, model, temperature=None, max_tokens=None):
+        got.update(model=model, max_tokens=max_tokens)
+        return lambda p: "ok"
+
+    monkeypatch.setattr(qb, "lmstudio_backend", fake_lm)
+    qb.builtin_backend("http://127.0.0.1:1")
+    assert got == {"model": "ornith-ai/ornith-1.5-9b", "max_tokens": 256}
 
 
 def test_dashboard_resolve_model_honors_family_env(monkeypatch):
@@ -156,6 +232,66 @@ def test_dashboard_resolve_model_prefers_9b(monkeypatch):
     model, err = D.resolve_model(
         {"backend_url": "http://127.0.0.1:1", "model": "auto"})
     assert model == "ornith-1.5-9b-mlx-vision" and err is None
+
+
+def test_dashboard_defaults_have_seat_and_guest_keys():
+    assert D.DEFAULTS["seat_family"] == ""
+    assert D.DEFAULTS["seat_preferred"] == ""
+    assert D.DEFAULTS["guest_temperature"] == 0.7
+    assert D.DEFAULTS["guest_max_tokens"] == 1024
+
+
+def test_resolve_model_settings_family_and_preferred(monkeypatch):
+    def fake_urlopen(url, timeout=None):
+        return _FakeResp({"data": [
+            {"id": "ornith-1.5-122b-mlx"},
+            {"id": "ornith-1.5-9b-mlx-vision"},
+            {"id": "soc-fused-q8"}]})
+    monkeypatch.setattr(D.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.delenv("ORNITH_FAMILY", raising=False)
+    monkeypatch.delenv("ORNITH_PREFERRED", raising=False)
+    s = {"backend_url": "http://127.0.0.1:1", "model": "auto"}
+    model, _ = D.resolve_model(s)
+    assert model == "ornith-1.5-9b-mlx-vision"
+    s["seat_preferred"] = "ornith-1.5-122b-mlx"
+    model, _ = D.resolve_model(s)
+    assert model == "ornith-1.5-122b-mlx"
+    s["seat_family"] = "soc"
+    model, _ = D.resolve_model(s)
+    assert model == "soc-fused-q8"
+
+
+def test_resolve_model_env_beats_settings(monkeypatch):
+    def fake_urlopen(url, timeout=None):
+        return _FakeResp({"data": [
+            {"id": "ornith-1.5-122b-mlx"},
+            {"id": "ornith-1.5-9b-mlx-vision"}]})
+    monkeypatch.setattr(D.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("ORNITH_PREFERRED", "ornith-1.5-122b-mlx")
+    s = {"backend_url": "http://127.0.0.1:1", "model": "auto",
+         "seat_preferred": "ornith-1.5-9b-mlx-vision"}
+    model, _ = D.resolve_model(s)
+    assert model == "ornith-1.5-122b-mlx"
+
+
+def test_save_settings_coerces_seat_and_guest_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "SETTINGS_PATH", str(tmp_path / "s.json"))
+    s = D.save_settings({"seat_family": "  soc  ",
+                         "guest_temperature": "0.3",
+                         "guest_max_tokens": "512"})
+    assert s["seat_family"] == "soc"
+    assert s["guest_temperature"] == 0.3
+    assert s["guest_max_tokens"] == 512
+    s = D.save_settings({"guest_max_tokens": "8"})
+    assert s["guest_max_tokens"] == 64
+    s = D.save_settings({"guest_max_tokens": "999999"})
+    assert s["guest_max_tokens"] == 32768
+
+
+def test_dashboard_page_has_seat_controls():
+    for cid in ("s-seatfamily", "s-seatpreferred", "s-guesttemp",
+                "s-guesttokens"):
+        assert ('id="%s"' % cid) in D.PAGE, cid
 
 
 # --- guest FIFO queue ---
