@@ -1,0 +1,23 @@
+# Ornith 1.5 9B one-off tune for the Qwen-Linux system (2026-10-31 overnight)
+# Duckets' order 2026-10-31: "We will tune Ornith overnight" / "do it while
+# I'm asleep for the Ornith one". SINGLE run - NOT RSI, no lineage.
+# Recipe per RUN-PLAN.md: LoRA r16, LR 5e-5..1e-4 (7e-5 chosen), ~600-1200
+# iters (1000 chosen), completions-only loss (mask_prompt), base = Sabrent
+# ornith-1.5-9b MLX vision-complete. max_seq_length 3072 because the longest
+# rendered row is 2,593 tokens (config adjustment; dataset untouched).
+model: /Volumes/Sabrent/ornith-1.5-9b-mlx-vision
+data: /Volumes/Sabrent/datasets/ornith-qwenlinux/2026-10-31
+train: true
+train_mode: sft
+train_type: lora
+iters: 1000
+batch_size: 2
+learning_rate: 0.00007
+num_layers: 16
+max_seq_length: 3072
+mask_prompt: true
+lora_parameters:
+  rank: 16
+  dropout: 0.0
+  scale: 10.0
+fuse: false
