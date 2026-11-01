@@ -367,9 +367,11 @@ static int in_ram(uint32_t addr, int n) {
 }
 static uint32_t read_mem(uint32_t addr, int n) {
     if (in_ram(addr, n)) {
-        uint32_t v = 0;
-        for (int i = 0; i < n; i++) v |= (uint32_t)ram[addr - RAM_BASE + i] << 8 * i;
-        return v;
+        // callers pre-check alignment; memcpy stays correct regardless
+        uint8_t *p = ram + (addr - RAM_BASE);
+        if (n == 4) { uint32_t v; memcpy(&v, p, 4); return v; }
+        if (n == 2) { uint16_t v; memcpy(&v, p, 2); return v; }
+        return p[0];
     }
     if (addr >= MMIO_LO && addr < MMIO_HI) return mmio_read(addr, n);
     raise_trap(C_LOAD_FAULT, addr);
@@ -377,7 +379,10 @@ static uint32_t read_mem(uint32_t addr, int n) {
 }
 static void write_mem(uint32_t addr, uint32_t v, int n) {
     if (in_ram(addr, n)) {
-        for (int i = 0; i < n; i++) ram[addr - RAM_BASE + i] = v >> 8 * i & 0xFF;
+        uint8_t *p = ram + (addr - RAM_BASE);
+        if (n == 4) { memcpy(p, &v, 4); return; }
+        if (n == 2) { uint16_t h = (uint16_t)v; memcpy(p, &h, 2); return; }
+        p[0] = (uint8_t)v;
         return;
     }
     if (addr >= MMIO_LO && addr < MMIO_HI) { mmio_write(addr, v, n); return; }
@@ -413,12 +418,8 @@ static void execute(uint32_t w, uint32_t at) {
 
     uint32_t opc = w & 0x7F, rd = w >> 7 & 31, f3 = w >> 12 & 7;
     uint32_t rs1 = w >> 15 & 31, rs2 = w >> 20 & 31, f7 = w >> 25;
-    int32_t i_imm = sx32(w >> 20, 12);
-    int32_t s_imm = sx32((w >> 25) << 5 | (w >> 7 & 31), 12);
-    int32_t b_imm = sx32((w >> 31 & 1) << 12 | (w >> 7 & 1) << 11 |
-                         (w >> 25 & 63) << 5 | (w >> 8 & 15) << 1, 13);
-    int32_t j_imm = sx32((w >> 31 & 1) << 20 | (w >> 12 & 0xFF) << 12 |
-                         (w >> 20 & 1) << 11 | (w >> 21 & 0x3FF) << 1, 21);
+    // immediates decode lazily, one per opcode below: every instruction
+    // used to pay for all four sign-extensions
     uint32_t a = x[rs1], b = x[rs2];
     uint32_t res = 0; int has_res = 0;
 
@@ -465,13 +466,21 @@ static void execute(uint32_t w, uint32_t at) {
     switch (opc) {
     case 0x37: res = (uint32_t)sx32(w & 0xFFFFF000u, 32); has_res = 1; break;  // LUI
     case 0x17: res = at + (uint32_t)sx32(w & 0xFFFFF000u, 32); has_res = 1; break; // AUIPC
-    case 0x6F: res = nxt; nxt = at + (uint32_t)j_imm; has_res = 1; break;      // JAL
-    case 0x67:                                                            // JALR
+    case 0x6F: {                                                          // JAL
+        int32_t j_imm = sx32((w >> 31 & 1) << 20 | (w >> 12 & 0xFF) << 12 |
+                             (w >> 20 & 1) << 11 | (w >> 21 & 0x3FF) << 1, 21);
+        res = nxt; nxt = at + (uint32_t)j_imm; has_res = 1; break;
+    }
+    case 0x67: {                                                          // JALR
         if (f3 != 0) { raise_trap(C_ILLEGAL, w); return; }
+        int32_t i_imm = sx32(w >> 20, 12);
         res = nxt; nxt = (a + (uint32_t)i_imm) & ~1u; has_res = 1;
         break;
+    }
     case 0x63: {                                                          // branches
         if (f3 == 2 || f3 == 3) { raise_trap(C_ILLEGAL, w); return; }
+        int32_t b_imm = sx32((w >> 31 & 1) << 12 | (w >> 7 & 1) << 11 |
+                             (w >> 25 & 63) << 5 | (w >> 8 & 15) << 1, 13);
         int take;
         switch (f3) {
         case 0: take = a == b; break;
@@ -486,6 +495,7 @@ static void execute(uint32_t w, uint32_t at) {
     }
     case 0x03: {                                                          // loads
         if (f3 == 3 || f3 == 6 || f3 == 7) { raise_trap(C_ILLEGAL, w); return; }
+        int32_t i_imm = sx32(w >> 20, 12);
         int n = (f3 == 0 || f3 == 4) ? 1 : (f3 == 1 || f3 == 5) ? 2 : 4;
         uint32_t ea = a + (uint32_t)i_imm;
         if (ea % (uint32_t)n) { raise_trap(C_LOAD_MISALIGNED, ea); return; }
@@ -497,6 +507,7 @@ static void execute(uint32_t w, uint32_t at) {
     }
     case 0x23: {                                                          // stores
         if (f3 > 2) { raise_trap(C_ILLEGAL, w); return; }
+        int32_t s_imm = sx32((w >> 25) << 5 | (w >> 7 & 31), 12);
         int n = f3 == 0 ? 1 : f3 == 1 ? 2 : 4;
         uint32_t ea = a + (uint32_t)s_imm;
         if (ea % (uint32_t)n) { raise_trap(C_STORE_MISALIGNED, ea); return; }
@@ -505,6 +516,7 @@ static void execute(uint32_t w, uint32_t at) {
         break;
     }
     case 0x13: {                                                          // OP-IMM
+        int32_t i_imm = sx32(w >> 20, 12);
         switch (f3) {
         case 0: res = a + (uint32_t)i_imm; break;
         case 1:
@@ -599,8 +611,8 @@ static void step(void) {
     uint32_t at = pc;
     if (at & 3) { take_trap(C_INST_MISALIGNED, at, 0, at); return; }
     if (!in_ram(at, 4)) { take_trap(C_INST_FAULT, at, 0, at); return; }
-    uint32_t w = (uint32_t)ram[at - RAM_BASE] | (uint32_t)ram[at - RAM_BASE + 1] << 8 |
-                 (uint32_t)ram[at - RAM_BASE + 2] << 16 | (uint32_t)ram[at - RAM_BASE + 3] << 24;
+    uint32_t w;   // at is 4-aligned in RAM: one load, same bytes (LE host)
+    memcpy(&w, ram + (at - RAM_BASE), 4);
     trapped = 0;
     execute(w, at);
     if (trapped) { take_trap(trap_cause, trap_tval, 0, at); return; }

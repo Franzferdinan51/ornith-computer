@@ -1143,13 +1143,24 @@ in-weights computer consults.</p>
 <div class="card"><h3>DESKTOP &mdash; NOT BUILT YET</h3>
 <p>no framebuffer build exists in this tree. the display path was
 proven by the Doom port (<code>github.com/Franzferdinan51
-/qwenputer-doom</code>: guest draws in its memory, host shows it,
-keys go back in), and a framebuffer shell &mdash; a screen window in
-guest memory, a pointer, simple windows &mdash; is the planned spike.
-it will live in this tab when it lands.</p>
-<p class="dim">realistic on the fast core. on the in-weights circuit
-the same trick works mechanically (the mailbox proved host access to
-circuit memory) but at ~17 instructions/second a desktop is a
+/qwenputer-doom</code>), and the spike follows its architecture:</p>
+<ol>
+<li>guest draws into a fixed framebuffer window in its own RAM, and
+bumps a frame-count cell when a frame is done &mdash; the way
+<code>DG_DrawFrame</code> commits frames in the Doom port.</li>
+<li>the fast core watches that one cell (Doom's frame hook) and the
+host snapshots the window to PNG on change &mdash; same writer shape
+as <code>fastemu --live</code>.</li>
+<li>keys and pointer go back in through a small control file poked
+at frame boundaries &mdash; Doom's <code>--control</code> channel
+(minus the demo-flag half: a desktop has no demo).</li>
+<li>this tab serves the page, on :8960 next to the terminal.</li>
+</ol>
+<p class="dim">realistic on the fast core, which gained Doom's loop
+tricks (lazy immediates, word memory paths: ~210M to ~228M
+steps/s, parity-identical). on the in-weights circuit the same
+display trick works mechanically (the mailbox proved host access
+to circuit memory) but at ~17 instructions/second a desktop is a
 screenshot an hour, not a desktop.</p></div>
 </div></section>
 <section id="apps" class="tab">
